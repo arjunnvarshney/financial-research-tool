@@ -11,19 +11,20 @@ app = FastAPI()
 # ✅ Allow frontend (browser) to talk to backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For demo purposes
+    allow_origins=["*"],  # Demo safe
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------
-# Extract text from uploaded PDF
+# Extract text from uploaded PDF (MEMORY SAFE)
 # -----------------------------
 def extract_text_from_pdf(file_bytes):
     text = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
+        # 🔥 LIMIT to first 40 pages (prevents memory crash on Render free tier)
+        for page in pdf.pages[:40]:
             page_text = page.extract_text()
             if page_text:
                 text += page_text + "\n"
@@ -39,8 +40,8 @@ def get_income_statement_lines(text):
 
     financial_terms = [
         "revenue", "sales", "cost", "gross",
-        "operating", "income", "profit", "loss",
-        "earnings", "eps"
+        "operating income", "operating expenses",
+        "net income", "earnings per share", "eps"
     ]
 
     for line in lines:
@@ -76,15 +77,15 @@ def extract_numbers(line):
 def normalize_label(line):
     lower = line.lower()
 
-    if "revenue" in lower or "sales" in lower:
+    if "total net sales" in lower or "net sales" in lower:
         return "Revenue"
-    elif "cost" in lower:
+    elif "cost of sales" in lower:
         return "Cost of Revenue"
-    elif "gross" in lower:
+    elif "gross margin" in lower or "gross profit" in lower:
         return "Gross Profit"
     elif "operating income" in lower:
         return "Operating Income"
-    elif "operating expense" in lower:
+    elif "operating expenses" in lower:
         return "Operating Expenses"
     elif "net income" in lower or "net profit" in lower or "net earnings" in lower:
         return "Net Income"
@@ -101,14 +102,8 @@ def normalize_label(line):
 async def extract_financials(file: UploadFile = File(...)):
     contents = await file.read()
 
-    # Extract text from PDF
+    # Extract text (memory optimized)
     text = extract_text_from_pdf(contents)
-
-    # Debug prints (can remove later)
-    print("\n========== TEXT LENGTH ==========\n", len(text))
-    print("\n========== SAMPLE FROM MIDDLE ==========\n")
-    print(text[len(text)//2 : len(text)//2 + 1000])
-    print("\n=================================\n")
 
     # Detect financial lines
     lines = get_income_statement_lines(text)
@@ -119,15 +114,25 @@ async def extract_financials(file: UploadFile = File(...)):
         label = normalize_label(line)
         numbers = extract_numbers(line)
 
-        row = {
-            "Raw Line": line,
-            "Standard Label": label,
-            "Values Found": ", ".join(numbers) if numbers else "NOT FOUND"
-        }
-        data.append(row)
+        # Only keep meaningful financial lines
+        if label != "UNKNOWN" and numbers:
+            row = {
+                "Raw Line": line,
+                "Standard Label": label,
+                "Values Found": ", ".join(numbers)
+            }
+            data.append(row)
 
     # Convert to CSV
     df = pd.DataFrame(data)
+
+    # Fallback if nothing found
+    if df.empty:
+        df = pd.DataFrame([{
+            "Raw Line": "No income statement data detected in first 40 pages.",
+            "Standard Label": "INFO",
+            "Values Found": ""
+        }])
 
     stream = io.StringIO()
     df.to_csv(stream, index=False)
